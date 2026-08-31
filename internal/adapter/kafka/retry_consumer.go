@@ -7,6 +7,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/adriano-linux/payment-service-go/internal/domain"
 	"github.com/adriano-linux/payment-service-go/internal/usecase"
@@ -56,6 +59,15 @@ func (c *RetryConsumer) Run(ctx context.Context) {
 }
 
 func (c *RetryConsumer) handleRecord(ctx context.Context, r *kgo.Record) {
+	// Continua o trace original (não o do produtor pro tópico de retry, e sim
+	// o que sobreviveu via traceHeadersFrom desde o primeiro consumo) — ver
+	// consumer.go.
+	carrierHeaders := r.Headers
+	ctx = otel.GetTextMapPropagator().Extract(ctx, newHeaderCarrier(&carrierHeaders))
+	ctx, span := otel.Tracer("payment-service-kafka").Start(ctx, "kafka.retry-consume "+c.topic,
+		trace.WithSpanKind(trace.SpanKindConsumer))
+	defer span.End()
+
 	notBefore := NotBeforeFromHeaders(r.Headers)
 	if wait := time.Until(notBefore); wait > 0 {
 		select {
@@ -75,11 +87,15 @@ func (c *RetryConsumer) handleRecord(ctx context.Context, r *kgo.Record) {
 		return
 	}
 
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
+
 	nextAttempt := attempt + 1
 	if nextAttempt <= MaxAttempts {
 		slog.WarnContext(ctx, "retry attempt failed, scheduling next attempt",
 			"eventType", eventType, "attempt", nextAttempt, "error", err)
 		headers := BuildRetryHeaders(originalTopic, originalKey, eventType, nextAttempt)
+		headers = append(headers, traceHeadersFrom(r.Headers)...)
 		if pubErr := c.producer.PublishRaw(ctx, c.topic, originalKey, headers, r.Value); pubErr != nil {
 			slog.ErrorContext(ctx, "failed to republish retry, message may be lost", "error", pubErr)
 		}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel"
 )
 
 // Producer publishes JSON events with the same headers the Java services use
@@ -25,15 +26,20 @@ func (p *Producer) Publish(ctx context.Context, topic, key, eventType string, pa
 		return fmt.Errorf("marshalling event payload for %s: %w", eventType, err)
 	}
 
+	headers := []kgo.RecordHeader{
+		{Key: "event-type", Value: []byte(eventType)},
+		{Key: "event-version", Value: []byte("1")},
+		{Key: "occurred-at", Value: []byte(time.Now().UTC().Format(time.RFC3339Nano))},
+	}
+	// Injeta o traceparent do span ativo (HTTP handler ou consumer que chamou
+	// Publish), pra quem consumir esse tópico poder continuar o mesmo trace.
+	otel.GetTextMapPropagator().Inject(ctx, newHeaderCarrier(&headers))
+
 	record := &kgo.Record{
-		Topic: topic,
-		Key:   []byte(key),
-		Value: body,
-		Headers: []kgo.RecordHeader{
-			{Key: "event-type", Value: []byte(eventType)},
-			{Key: "event-version", Value: []byte("1")},
-			{Key: "occurred-at", Value: []byte(time.Now().UTC().Format(time.RFC3339Nano))},
-		},
+		Topic:   topic,
+		Key:     []byte(key),
+		Value:   body,
+		Headers: headers,
 	}
 
 	result := p.client.ProduceSync(ctx, record)

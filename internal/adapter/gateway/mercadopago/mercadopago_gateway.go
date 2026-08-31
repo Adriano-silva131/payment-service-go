@@ -14,6 +14,7 @@ import (
 	mpconfig "github.com/mercadopago/sdk-go/pkg/config"
 	"github.com/mercadopago/sdk-go/pkg/payment"
 	"github.com/mercadopago/sdk-go/pkg/preference"
+	"github.com/mercadopago/sdk-go/pkg/requestoptions"
 
 	"github.com/adriano-linux/payment-service-go/internal/domain"
 	"github.com/adriano-linux/payment-service-go/internal/usecase"
@@ -46,6 +47,10 @@ func (g *Gateway) Method() domain.PaymentMethod {
 
 func (g *Gateway) CreateCheckout(ctx context.Context, req usecase.CheckoutRequest) (*usecase.CheckoutResult, error) {
 	amount, _ := req.Amount.Float64()
+
+	if req.IdempotencyKey != "" {
+		ctx = requestoptions.WithIdempotencyKey(ctx, req.IdempotencyKey)
+	}
 
 	pref, err := g.preferences.Create(ctx, preference.Request{
 		ExternalReference: req.OrderID.String(),

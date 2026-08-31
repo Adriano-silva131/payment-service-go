@@ -69,6 +69,14 @@ func (h *CheckoutHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "this order does not belong to you")
 			return
 		}
+		if errors.Is(err, domain.ErrCheckoutInProgress) {
+			writeError(w, http.StatusConflict, "checkout already in progress for this order")
+			return
+		}
+		if errors.Is(err, domain.ErrPaymentAlreadyResolved) {
+			writeError(w, http.StatusConflict, "payment for this order has already been approved or rejected")
+			return
+		}
 		slog.ErrorContext(r.Context(), "checkout failed", "orderId", orderID, "error", err)
 		writeError(w, http.StatusBadGateway, "failed to start checkout with payment gateway")
 		return

@@ -5,6 +5,9 @@ import (
 	"log/slog"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Consumer polls a single topic in a consumer group and dispatches each record by its
@@ -50,6 +53,15 @@ func (c *Consumer) Run(ctx context.Context) {
 }
 
 func (c *Consumer) handleRecord(ctx context.Context, r *kgo.Record) {
+	// Extrai o traceparent do produtor (se houver) e abre um span filho, pra
+	// esse consumo aparecer conectado ao trace de quem publicou a mensagem
+	// em vez de começar um trace novo e desconectado.
+	carrierHeaders := r.Headers
+	ctx = otel.GetTextMapPropagator().Extract(ctx, newHeaderCarrier(&carrierHeaders))
+	ctx, span := otel.Tracer("payment-service-kafka").Start(ctx, "kafka.consume "+r.Topic,
+		trace.WithSpanKind(trace.SpanKindConsumer))
+	defer span.End()
+
 	eventType := EventTypeFromHeaders(r.Headers)
 
 	err := c.registry.Dispatch(ctx, eventType, r.Value)
@@ -57,11 +69,15 @@ func (c *Consumer) handleRecord(ctx context.Context, r *kgo.Record) {
 		return
 	}
 
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
+
 	slog.ErrorContext(ctx, "handler failed, sending to retry topic",
 		"topic", r.Topic, "eventType", eventType, "error", err)
 
 	retryTopic := RetryTopic(r.Topic)
 	headers := BuildRetryHeaders(r.Topic, string(r.Key), eventType, 1)
+	headers = append(headers, traceHeadersFrom(r.Headers)...)
 	if pubErr := c.producer.PublishRaw(ctx, retryTopic, string(r.Key), headers, r.Value); pubErr != nil {
 		slog.ErrorContext(ctx, "failed to publish to retry topic, message may be lost",
 			"topic", retryTopic, "error", pubErr)

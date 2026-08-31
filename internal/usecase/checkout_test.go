@@ -21,11 +21,13 @@ type fakeGateway struct {
 	checkoutErr    error
 	webhookResult  *usecase.WebhookNotification
 	webhookErr     error
+	lastCheckout   usecase.CheckoutRequest
 }
 
 func (g *fakeGateway) Method() domain.PaymentMethod { return g.method }
 
 func (g *fakeGateway) CreateCheckout(ctx context.Context, req usecase.CheckoutRequest) (*usecase.CheckoutResult, error) {
+	g.lastCheckout = req
 	return g.checkoutResult, g.checkoutErr
 }
 
@@ -114,4 +116,90 @@ func TestStartCheckout_RejectsWhenCallerIsNotTheOrderOwner(t *testing.T) {
 
 	_, err := uc.Handle(context.Background(), usecase.StartCheckoutInput{OrderID: orderID, Method: domain.PaymentMethodStripe, CustomerID: "someone-else"})
 	assert.ErrorIs(t, err, domain.ErrForbidden)
+}
+
+func TestStartCheckout_SendsStableIdempotencyKeyToGateway(t *testing.T) {
+	repo := newFakePaymentRepo()
+	orderID := uuid.New()
+	stagedPayment(repo, orderID, "customer-1")
+
+	stripe := &fakeGateway{
+		method:         domain.PaymentMethodStripe,
+		checkoutResult: &usecase.CheckoutResult{GatewayTransactionID: "cs_test_123", CheckoutURL: "https://checkout.stripe.com/cs_test_123"},
+	}
+	resolver := &fakeGatewayResolver{gateways: map[domain.PaymentMethod]usecase.PaymentGateway{domain.PaymentMethodStripe: stripe}}
+
+	uc := usecase.NewStartCheckout(repo, resolver, "https://success", "https://cancel")
+	_, err := uc.Handle(context.Background(), usecase.StartCheckoutInput{OrderID: orderID, Method: domain.PaymentMethodStripe, CustomerID: "customer-1"})
+
+	require.NoError(t, err)
+	assert.Equal(t, orderID.String(), stripe.lastCheckout.IdempotencyKey, "idempotency key must be stable per order, so a retried call resolves to the same gateway session")
+}
+
+func TestStartCheckout_ConcurrentCallForSameOrderIsRejectedNotDoubleCharged(t *testing.T) {
+	repo := newFakePaymentRepo()
+	orderID := uuid.New()
+	stagedPayment(repo, orderID, "customer-1")
+
+	// Simulates a second request winning the race after the first already claimed the order.
+	claimed, err := repo.TryClaimForCheckout(context.Background(), orderID)
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	resolver := &fakeGatewayResolver{gateways: map[domain.PaymentMethod]usecase.PaymentGateway{}}
+	uc := usecase.NewStartCheckout(repo, resolver, "https://success", "https://cancel")
+
+	_, err = uc.Handle(context.Background(), usecase.StartCheckoutInput{OrderID: orderID, Method: domain.PaymentMethodStripe, CustomerID: "customer-1"})
+	assert.ErrorIs(t, err, domain.ErrCheckoutInProgress)
+}
+
+func TestStartCheckout_ReleasesClaimWhenPersistingResultFails(t *testing.T) {
+	repo := newFakePaymentRepo()
+	orderID := uuid.New()
+	stagedPayment(repo, orderID, "customer-1")
+	repo.updateErr = assert.AnError
+
+	stripe := &fakeGateway{
+		method:         domain.PaymentMethodStripe,
+		checkoutResult: &usecase.CheckoutResult{GatewayTransactionID: "cs_test_123", CheckoutURL: "https://checkout.stripe.com/cs_test_123"},
+	}
+	resolver := &fakeGatewayResolver{gateways: map[domain.PaymentMethod]usecase.PaymentGateway{domain.PaymentMethodStripe: stripe}}
+	uc := usecase.NewStartCheckout(repo, resolver, "https://success", "https://cancel")
+
+	_, err := uc.Handle(context.Background(), usecase.StartCheckoutInput{OrderID: orderID, Method: domain.PaymentMethodStripe, CustomerID: "customer-1"})
+	require.Error(t, err)
+
+	assert.Equal(t, domain.PaymentStatusPending, repo.byOrderID[orderID].Status,
+		"a gateway session was created but never persisted — the claim must still be released so the order isn't stuck forever")
+}
+
+func TestStartCheckout_AlreadyResolvedPaymentReturnsDistinctError(t *testing.T) {
+	repo := newFakePaymentRepo()
+	orderID := uuid.New()
+	stagedPayment(repo, orderID, "customer-1")
+	repo.byOrderID[orderID].Status = domain.PaymentStatusApproved
+
+	resolver := &fakeGatewayResolver{gateways: map[domain.PaymentMethod]usecase.PaymentGateway{}}
+	uc := usecase.NewStartCheckout(repo, resolver, "https://success", "https://cancel")
+
+	_, err := uc.Handle(context.Background(), usecase.StartCheckoutInput{OrderID: orderID, Method: domain.PaymentMethodStripe, CustomerID: "customer-1"})
+	assert.ErrorIs(t, err, domain.ErrPaymentAlreadyResolved,
+		"an already-approved/rejected order must not be reported as a transient checkout race")
+}
+
+func TestStartCheckout_ReleasesClaimWhenGatewayCallFails(t *testing.T) {
+	repo := newFakePaymentRepo()
+	orderID := uuid.New()
+	stagedPayment(repo, orderID, "customer-1")
+
+	stripe := &fakeGateway{method: domain.PaymentMethodStripe, checkoutErr: assert.AnError}
+	resolver := &fakeGatewayResolver{gateways: map[domain.PaymentMethod]usecase.PaymentGateway{domain.PaymentMethodStripe: stripe}}
+	uc := usecase.NewStartCheckout(repo, resolver, "https://success", "https://cancel")
+
+	_, err := uc.Handle(context.Background(), usecase.StartCheckoutInput{OrderID: orderID, Method: domain.PaymentMethodStripe, CustomerID: "customer-1"})
+	require.Error(t, err)
+
+	payment, err := repo.FindByOrderID(context.Background(), orderID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.PaymentStatusPending, payment.Status, "a failed gateway call must release the claim so the order can be retried")
 }

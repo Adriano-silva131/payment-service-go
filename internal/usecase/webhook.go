@@ -57,7 +57,7 @@ func (uc *HandleWebhook) Handle(ctx context.Context, method domain.PaymentMethod
 		return fmt.Errorf("loading payment for %s notification: %w", method, err)
 	}
 
-	if payment.Status != domain.PaymentStatusPending {
+	if payment.Status == domain.PaymentStatusApproved || payment.Status == domain.PaymentStatusRejected {
 		// Already resolved (duplicate webhook delivery is expected/normal for both
 		// Stripe and Mercado Pago) — treat as a no-op success, don't republish.
 		return nil

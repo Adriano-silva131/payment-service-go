@@ -10,9 +10,10 @@ import (
 type PaymentStatus string
 
 const (
-	PaymentStatusPending  PaymentStatus = "PENDING"
-	PaymentStatusApproved PaymentStatus = "APPROVED"
-	PaymentStatusRejected PaymentStatus = "REJECTED"
+	PaymentStatusPending         PaymentStatus = "PENDING"
+	PaymentStatusCheckoutStarted PaymentStatus = "CHECKOUT_STARTED"
+	PaymentStatusApproved        PaymentStatus = "APPROVED"
+	PaymentStatusRejected        PaymentStatus = "REJECTED"
 )
 
 type PaymentMethod string

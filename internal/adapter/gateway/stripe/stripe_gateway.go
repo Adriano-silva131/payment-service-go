@@ -56,6 +56,10 @@ func (g *Gateway) CreateCheckout(ctx context.Context, req usecase.CheckoutReques
 		},
 	}
 
+	if req.IdempotencyKey != "" {
+		params.SetIdempotencyKey(req.IdempotencyKey)
+	}
+
 	session, err := g.client.V1CheckoutSessions.Create(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("creating stripe checkout session: %w", err)

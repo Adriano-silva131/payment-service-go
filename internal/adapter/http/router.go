@@ -5,6 +5,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/adriano-linux/payment-service-go/internal/adapter/http/handler"
 )
@@ -22,7 +23,7 @@ type RouterDeps struct {
 // unauthenticated infra endpoints, same as every other orderhub service.
 func NewRouter(deps RouterDeps) http.Handler {
 	r := chi.NewRouter()
-	r.Use(Recoverer, RequestLogger)
+	r.Use(Recoverer, otelhttp.NewMiddleware("payment-service"), RequestLogger)
 
 	r.Get("/healthz", deps.Health.Liveness)
 	r.Get("/readyz", deps.Health.Readiness)

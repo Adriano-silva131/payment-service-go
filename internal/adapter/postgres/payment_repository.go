@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -69,6 +70,30 @@ func (r *PaymentRepository) Update(ctx context.Context, p *domain.Payment) error
 	}
 	if tag.RowsAffected() == 0 {
 		return domain.ErrPaymentNotFound
+	}
+	return nil
+}
+
+func (r *PaymentRepository) TryClaimForCheckout(ctx context.Context, orderID uuid.UUID) (bool, error) {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE payments
+		SET status = $1, updated_at = $2
+		WHERE order_id = $3 AND status = $4
+	`, domain.PaymentStatusCheckoutStarted, time.Now().UTC(), orderID, domain.PaymentStatusPending)
+	if err != nil {
+		return false, fmt.Errorf("claiming payment for checkout: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+func (r *PaymentRepository) ReleaseCheckoutClaim(ctx context.Context, orderID uuid.UUID) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE payments
+		SET status = $1, updated_at = $2
+		WHERE order_id = $3 AND status = $4
+	`, domain.PaymentStatusPending, time.Now().UTC(), orderID, domain.PaymentStatusCheckoutStarted)
+	if err != nil {
+		return fmt.Errorf("releasing checkout claim: %w", err)
 	}
 	return nil
 }

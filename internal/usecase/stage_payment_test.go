@@ -16,6 +16,7 @@ import (
 type fakePaymentRepo struct {
 	byOrderID map[uuid.UUID]*domain.Payment
 	insertErr error
+	updateErr error
 }
 
 func newFakePaymentRepo() *fakePaymentRepo {
@@ -53,10 +54,33 @@ func (f *fakePaymentRepo) FindByGatewayTransactionID(ctx context.Context, gatewa
 }
 
 func (f *fakePaymentRepo) Update(ctx context.Context, p *domain.Payment) error {
+	if f.updateErr != nil {
+		return f.updateErr
+	}
 	if _, ok := f.byOrderID[p.OrderID]; !ok {
 		return domain.ErrPaymentNotFound
 	}
 	f.byOrderID[p.OrderID] = p
+	return nil
+}
+
+func (f *fakePaymentRepo) TryClaimForCheckout(ctx context.Context, orderID uuid.UUID) (bool, error) {
+	p, ok := f.byOrderID[orderID]
+	if !ok || p.Status != domain.PaymentStatusPending {
+		return false, nil
+	}
+	p.Status = domain.PaymentStatusCheckoutStarted
+	return true, nil
+}
+
+func (f *fakePaymentRepo) ReleaseCheckoutClaim(ctx context.Context, orderID uuid.UUID) error {
+	p, ok := f.byOrderID[orderID]
+	if !ok {
+		return domain.ErrPaymentNotFound
+	}
+	if p.Status == domain.PaymentStatusCheckoutStarted {
+		p.Status = domain.PaymentStatusPending
+	}
 	return nil
 }
 

@@ -24,6 +24,10 @@ type Config struct {
 
 	PaymentSuccessURL string `env:"PAYMENT_SUCCESS_URL" envDefault:"http://localhost:8000/checkout/success"`
 	PaymentCancelURL  string `env:"PAYMENT_CANCEL_URL" envDefault:"http://localhost:8000/checkout/cancel"`
+
+	OtelExporterOtlpEndpoint string  `env:"OTEL_EXPORTER_OTLP_ENDPOINT" envDefault:"http://otel-collector:4317"`
+	OtelServiceName          string  `env:"OTEL_SERVICE_NAME" envDefault:"payment-service"`
+	OtelTracesSampleRate     float64 `env:"OTEL_TRACES_SAMPLE_RATE" envDefault:"1.0"`
 }
 
 func Load() (*Config, error) {

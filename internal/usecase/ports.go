@@ -16,6 +16,13 @@ type PaymentRepository interface {
 	FindByOrderID(ctx context.Context, orderID uuid.UUID) (*domain.Payment, error)
 	FindByGatewayTransactionID(ctx context.Context, gateway domain.PaymentMethod, txID string) (*domain.Payment, error)
 	Update(ctx context.Context, p *domain.Payment) error
+	// TryClaimForCheckout atomically moves the payment from PENDING to CHECKOUT_STARTED,
+	// so concurrent StartCheckout calls for the same order can't both reach the gateway.
+	// Reports false (no error) if the payment wasn't PENDING — someone else already claimed it.
+	TryClaimForCheckout(ctx context.Context, orderID uuid.UUID) (bool, error)
+	// ReleaseCheckoutClaim reverts a CHECKOUT_STARTED payment back to PENDING, used when the
+	// gateway call after a successful claim fails, so a later request can retry.
+	ReleaseCheckoutClaim(ctx context.Context, orderID uuid.UUID) error
 }
 
 type DltRepository interface {
@@ -34,6 +41,10 @@ type CheckoutRequest struct {
 	CustomerEmail string
 	SuccessURL    string
 	CancelURL     string
+	// IdempotencyKey is stable per order, so a retried CreateCheckout call (client retry,
+	// crash-and-retry after the DB claim but before the gateway response was recorded)
+	// resolves to the same gateway-side session instead of creating a duplicate one.
+	IdempotencyKey string
 }
 
 type CheckoutResult struct {

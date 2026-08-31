@@ -42,7 +42,7 @@ func checkedOutPayment(repo *fakePaymentRepo, orderID uuid.UUID, method domain.P
 		OrderID:              orderID,
 		CustomerEmail:        "customer@example.com",
 		Amount:               decimal.NewFromInt(100),
-		Status:               domain.PaymentStatusPending,
+		Status:               domain.PaymentStatusCheckoutStarted,
 		Gateway:              &m,
 		GatewayTransactionID: &tx,
 		CreatedAt:            time.Now(),

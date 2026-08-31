@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -48,9 +50,28 @@ func (uc *StartCheckout) Handle(ctx context.Context, in StartCheckoutInput) (*St
 		return nil, domain.ErrForbidden
 	}
 
-	if payment.Status != domain.PaymentStatusPending {
-		return nil, fmt.Errorf("payment for order %s is not PENDING (status=%s), cannot start checkout", in.OrderID, payment.Status)
+	claimed, err := uc.repo.TryClaimForCheckout(ctx, in.OrderID)
+	if err != nil {
+		return nil, fmt.Errorf("claiming payment for checkout, order %s: %w", in.OrderID, err)
 	}
+	if !claimed {
+		if payment.Status == domain.PaymentStatusApproved || payment.Status == domain.PaymentStatusRejected {
+			return nil, domain.ErrPaymentAlreadyResolved
+		}
+		return nil, domain.ErrCheckoutInProgress
+	}
+
+	// From here on, any failure must release the claim back to PENDING so the order
+	// isn't stuck in CHECKOUT_STARTED forever with no usable checkout URL.
+	succeeded := false
+	defer func() {
+		if succeeded {
+			return
+		}
+		if releaseErr := uc.repo.ReleaseCheckoutClaim(ctx, in.OrderID); releaseErr != nil {
+			slog.ErrorContext(ctx, "failed to release checkout claim after error", "orderId", in.OrderID, "error", releaseErr)
+		}
+	}()
 
 	gw, err := uc.gateways.Resolve(in.Method)
 	if err != nil {
@@ -58,24 +79,28 @@ func (uc *StartCheckout) Handle(ctx context.Context, in StartCheckoutInput) (*St
 	}
 
 	result, err := gw.CreateCheckout(ctx, CheckoutRequest{
-		OrderID:       payment.OrderID,
-		Amount:        payment.Amount,
-		CustomerEmail: payment.CustomerEmail,
-		SuccessURL:    uc.successURL,
-		CancelURL:     uc.cancelURL,
+		OrderID:        payment.OrderID,
+		Amount:         payment.Amount,
+		CustomerEmail:  payment.CustomerEmail,
+		SuccessURL:     uc.successURL,
+		CancelURL:      uc.cancelURL,
+		IdempotencyKey: payment.OrderID.String(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating checkout session via %s: %w", in.Method, err)
 	}
 
 	method := in.Method
+	payment.Status = domain.PaymentStatusCheckoutStarted
 	payment.Gateway = &method
 	payment.GatewayTransactionID = &result.GatewayTransactionID
 	payment.CheckoutURL = &result.CheckoutURL
+	payment.UpdatedAt = time.Now().UTC()
 
 	if err := uc.repo.Update(ctx, payment); err != nil {
 		return nil, fmt.Errorf("persisting checkout session for order %s: %w", in.OrderID, err)
 	}
 
+	succeeded = true
 	return &StartCheckoutOutput{CheckoutURL: result.CheckoutURL}, nil
 }
