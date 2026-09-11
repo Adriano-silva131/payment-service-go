@@ -10,4 +10,6 @@ var (
 	ErrForbidden              = errors.New("caller does not own this payment")
 	ErrCheckoutInProgress     = errors.New("checkout already in progress for this order")
 	ErrPaymentAlreadyResolved = errors.New("payment for this order has already been approved or rejected")
+	ErrCheckoutNotStarted     = errors.New("no checkout session has been started for this order yet")
+	ErrPaymentStillPending    = errors.New("the gateway has not resolved this payment yet")
 )

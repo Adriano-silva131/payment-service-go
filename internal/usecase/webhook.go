@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/adriano-linux/payment-service-go/internal/domain"
 )
@@ -47,42 +46,44 @@ func (uc *HandleWebhook) Handle(ctx context.Context, method domain.PaymentMethod
 		return nil
 	}
 
+	return resolvePayment(ctx, uc.repo, uc.publisher, method, notification)
+}
+
+func resolvePayment(ctx context.Context, repo PaymentRepository, publisher EventPublisher, method domain.PaymentMethod, notification *WebhookNotification) error {
 	var payment *domain.Payment
+	var err error
 	if notification.OrderID != nil {
-		payment, err = uc.repo.FindByOrderID(ctx, *notification.OrderID)
+		payment, err = repo.FindByOrderID(ctx, *notification.OrderID)
 	} else {
-		payment, err = uc.repo.FindByGatewayTransactionID(ctx, method, notification.GatewayTransactionID)
+		payment, err = repo.FindByGatewayTransactionID(ctx, method, notification.GatewayTransactionID)
 	}
 	if err != nil {
 		return fmt.Errorf("loading payment for %s notification: %w", method, err)
 	}
 
 	if payment.Status == domain.PaymentStatusApproved || payment.Status == domain.PaymentStatusRejected {
-		// Already resolved (duplicate webhook delivery is expected/normal for both
-		// Stripe and Mercado Pago) — treat as a no-op success, don't republish.
 		return nil
 	}
 
-	payment.Status = notification.Status
-	payment.UpdatedAt = time.Now().UTC()
-	if notification.GatewayTransactionID != "" {
-		txID := notification.GatewayTransactionID
-		payment.GatewayTransactionID = &txID
+	resolved, err := repo.ResolveIfNotFinal(ctx, payment.OrderID, notification.Status, method, notification.GatewayTransactionID)
+	if err != nil {
+		return fmt.Errorf("resolving payment status for order %s: %w", payment.OrderID, err)
 	}
-
-	if err := uc.repo.Update(ctx, payment); err != nil {
-		return fmt.Errorf("updating payment status for order %s: %w", payment.OrderID, err)
+	if !resolved {
+		// Lost the race to a concurrent caller that resolved this payment first — it already
+		// published the event, so publishing again here would be a duplicate.
+		return nil
 	}
 
 	event := PaymentProcessedEvent{
 		OrderID:              payment.OrderID.String(),
-		Status:               string(payment.Status),
+		Status:               string(notification.Status),
 		CustomerEmail:        payment.CustomerEmail,
 		Gateway:              string(method),
 		GatewayTransactionID: notification.GatewayTransactionID,
 	}
 
-	if err := uc.publisher.Publish(ctx, PaymentEventsTopic, payment.OrderID.String(), PaymentProcessedV1Type, event); err != nil {
+	if err := publisher.Publish(ctx, PaymentEventsTopic, payment.OrderID.String(), PaymentProcessedV1Type, event); err != nil {
 		return fmt.Errorf("publishing payment.processed.v1 for order %s: %w", payment.OrderID, err)
 	}
 

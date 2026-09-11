@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
@@ -16,13 +17,10 @@ type PaymentRepository interface {
 	FindByOrderID(ctx context.Context, orderID uuid.UUID) (*domain.Payment, error)
 	FindByGatewayTransactionID(ctx context.Context, gateway domain.PaymentMethod, txID string) (*domain.Payment, error)
 	Update(ctx context.Context, p *domain.Payment) error
-	// TryClaimForCheckout atomically moves the payment from PENDING to CHECKOUT_STARTED,
-	// so concurrent StartCheckout calls for the same order can't both reach the gateway.
-	// Reports false (no error) if the payment wasn't PENDING — someone else already claimed it.
-	TryClaimForCheckout(ctx context.Context, orderID uuid.UUID) (bool, error)
-	// ReleaseCheckoutClaim reverts a CHECKOUT_STARTED payment back to PENDING, used when the
-	// gateway call after a successful claim fails, so a later request can retry.
+	TryClaimForCheckout(ctx context.Context, orderID uuid.UUID) (claimed bool, attempt int64, err error)
 	ReleaseCheckoutClaim(ctx context.Context, orderID uuid.UUID) error
+	ResolveIfNotFinal(ctx context.Context, orderID uuid.UUID, status domain.PaymentStatus, gateway domain.PaymentMethod, gatewayTransactionID string) (bool, error)
+	FindStaleCheckoutStarted(ctx context.Context, cutoff time.Time) ([]*domain.Payment, error)
 }
 
 type DltRepository interface {
@@ -36,14 +34,12 @@ type EventPublisher interface {
 }
 
 type CheckoutRequest struct {
-	OrderID       uuid.UUID
-	Amount        decimal.Decimal
-	CustomerEmail string
-	SuccessURL    string
-	CancelURL     string
-	// IdempotencyKey is stable per order, so a retried CreateCheckout call (client retry,
-	// crash-and-retry after the DB claim but before the gateway response was recorded)
-	// resolves to the same gateway-side session instead of creating a duplicate one.
+	OrderID        uuid.UUID
+	OrderNumber    int64
+	Amount         decimal.Decimal
+	CustomerEmail  string
+	SuccessURL     string
+	CancelURL      string
 	IdempotencyKey string
 }
 
@@ -62,4 +58,5 @@ type PaymentGateway interface {
 	Method() domain.PaymentMethod
 	CreateCheckout(ctx context.Context, req CheckoutRequest) (*CheckoutResult, error)
 	ParseWebhook(ctx context.Context, r *http.Request) (*WebhookNotification, error)
+	GetStatus(ctx context.Context, orderID uuid.UUID, gatewayTransactionID string) (*WebhookNotification, error)
 }

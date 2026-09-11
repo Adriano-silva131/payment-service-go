@@ -1,0 +1,1 @@
+ALTER TABLE payments ADD COLUMN checkout_attempt BIGINT NOT NULL DEFAULT 0;

@@ -32,6 +32,8 @@ func TestPaymentRepository_RealPostgres(t *testing.T) {
 			"../../migrations/000001_create_payments_table.up.sql",
 			"../../migrations/000002_create_dlt_messages_table.up.sql",
 			"../../migrations/000003_dlt_pending_unique_index.up.sql",
+			"../../migrations/000004_add_order_number.up.sql",
+			"../../migrations/000005_add_checkout_attempt.up.sql",
 		),
 	)
 	require.NoError(t, err)
@@ -102,6 +104,8 @@ func TestPaymentRepository_TryClaimForCheckout_OnlyOneConcurrentCallerWins(t *te
 			"../../migrations/000001_create_payments_table.up.sql",
 			"../../migrations/000002_create_dlt_messages_table.up.sql",
 			"../../migrations/000003_dlt_pending_unique_index.up.sql",
+			"../../migrations/000004_add_order_number.up.sql",
+			"../../migrations/000005_add_checkout_attempt.up.sql",
 		),
 	)
 	require.NoError(t, err)
@@ -136,7 +140,7 @@ func TestPaymentRepository_TryClaimForCheckout_OnlyOneConcurrentCallerWins(t *te
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			claimed, err := repo.TryClaimForCheckout(ctx, orderID)
+			claimed, _, err := repo.TryClaimForCheckout(ctx, orderID)
 			require.NoError(t, err)
 			results[i] = claimed
 		}(i)
@@ -154,4 +158,74 @@ func TestPaymentRepository_TryClaimForCheckout_OnlyOneConcurrentCallerWins(t *te
 	loaded, err := repo.FindByOrderID(ctx, orderID)
 	require.NoError(t, err)
 	require.Equal(t, domain.PaymentStatusCheckoutStarted, loaded.Status)
+}
+
+func TestPaymentRepository_ResolveIfNotFinal_OnlyOneConcurrentCallerWins(t *testing.T) {
+	ctx := context.Background()
+
+	container, err := postgres.Run(ctx, "postgres:16-alpine",
+		postgres.WithDatabase("paymentdb"),
+		postgres.WithUsername("orderdb"),
+		postgres.WithPassword("postgres"),
+		testcontainers.WithWaitStrategyAndDeadline(60*time.Second,
+			wait.ForLog("database system is ready to accept connections").WithOccurrence(2)),
+		postgres.WithInitScripts(
+			"../../migrations/000001_create_payments_table.up.sql",
+			"../../migrations/000002_create_dlt_messages_table.up.sql",
+			"../../migrations/000003_dlt_pending_unique_index.up.sql",
+			"../../migrations/000004_add_order_number.up.sql",
+			"../../migrations/000005_add_checkout_attempt.up.sql",
+		),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = container.Terminate(ctx) })
+
+	connStr, err := container.ConnectionString(ctx, "sslmode=disable")
+	require.NoError(t, err)
+
+	pool, err := pg.NewPool(ctx, connStr)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	repo := pg.NewPaymentRepository(pool)
+	orderID := uuid.New()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	require.NoError(t, repo.Insert(ctx, &domain.Payment{
+		ID:            uuid.New(),
+		OrderID:       orderID,
+		CustomerID:    "customer-1",
+		CustomerEmail: "customer@example.com",
+		Amount:        decimal.NewFromFloat(199.90),
+		Status:        domain.PaymentStatusCheckoutStarted,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}))
+
+	const concurrentCallers = 20
+	var wg sync.WaitGroup
+	results := make([]bool, concurrentCallers)
+	for i := range concurrentCallers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			resolved, err := repo.ResolveIfNotFinal(ctx, orderID, domain.PaymentStatusApproved, domain.PaymentMethodStripe, "cs_test_123")
+			require.NoError(t, err)
+			results[i] = resolved
+		}(i)
+	}
+	wg.Wait()
+
+	winners := 0
+	for _, resolved := range results {
+		if resolved {
+			winners++
+		}
+	}
+	require.Equal(t, 1, winners,
+		"exactly one concurrent ResolveIfNotFinal call must win for a given payment — every other caller (duplicate webhook, a racing reconcile call) must see false and skip publishing")
+
+	loaded, err := repo.FindByOrderID(ctx, orderID)
+	require.NoError(t, err)
+	require.Equal(t, domain.PaymentStatusApproved, loaded.Status)
 }

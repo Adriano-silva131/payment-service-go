@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 	stripego "github.com/stripe/stripe-go/v86"
 	"github.com/stripe/stripe-go/v86/webhook"
@@ -16,6 +18,11 @@ import (
 )
 
 const currency = "brl"
+
+// checkoutExpiration is the minimum a Stripe Checkout Session can be told to expire in.
+// Left at the default 24h, an abandoned checkout leaves the order stuck as "pending
+// payment" for a full day before checkout.session.expired fires and releases it.
+const checkoutExpiration = 30 * time.Minute
 
 type Gateway struct {
 	client        *stripego.Client
@@ -38,6 +45,7 @@ func (g *Gateway) CreateCheckout(ctx context.Context, req usecase.CheckoutReques
 
 	params := &stripego.CheckoutSessionCreateParams{
 		Mode:              stripego.String(string(stripego.CheckoutSessionModePayment)),
+		ExpiresAt:         stripego.Int64(time.Now().Add(checkoutExpiration).Unix()),
 		SuccessURL:        stripego.String(req.SuccessURL + "?orderId=" + req.OrderID.String()),
 		CancelURL:         stripego.String(req.CancelURL + "?orderId=" + req.OrderID.String()),
 		CustomerEmail:     stripego.String(req.CustomerEmail),
@@ -49,7 +57,7 @@ func (g *Gateway) CreateCheckout(ctx context.Context, req usecase.CheckoutReques
 					Currency:   stripego.String(currency),
 					UnitAmount: stripego.Int64(amountInCents),
 					ProductData: &stripego.CheckoutSessionCreateLineItemPriceDataProductDataParams{
-						Name: stripego.String(fmt.Sprintf("Pedido OrderHub %s", req.OrderID)),
+						Name: stripego.String(fmt.Sprintf("Pedido OrderHub #%d", req.OrderNumber)),
 					},
 				},
 			},
@@ -69,6 +77,21 @@ func (g *Gateway) CreateCheckout(ctx context.Context, req usecase.CheckoutReques
 		GatewayTransactionID: session.ID,
 		CheckoutURL:          session.URL,
 	}, nil
+}
+
+func (g *Gateway) GetStatus(ctx context.Context, orderID uuid.UUID, gatewayTransactionID string) (*usecase.WebhookNotification, error) {
+	session, err := g.client.V1CheckoutSessions.Retrieve(ctx, gatewayTransactionID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("retrieving stripe checkout session %s: %w", gatewayTransactionID, err)
+	}
+
+	if session.PaymentStatus == stripego.CheckoutSessionPaymentStatusPaid {
+		return &usecase.WebhookNotification{GatewayTransactionID: session.ID, Status: domain.PaymentStatusApproved}, nil
+	}
+	if session.Status == stripego.CheckoutSessionStatusExpired {
+		return &usecase.WebhookNotification{GatewayTransactionID: session.ID, Status: domain.PaymentStatusRejected}, nil
+	}
+	return nil, nil
 }
 
 func (g *Gateway) ParseWebhook(ctx context.Context, r *http.Request) (*usecase.WebhookNotification, error) {

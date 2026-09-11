@@ -12,15 +12,12 @@ import (
 
 type RouterDeps struct {
 	Checkout           *handler.CheckoutHandler
+	Reconcile          *handler.ReconcileHandler
 	StripeWebhook      *handler.WebhookHandler
 	MercadoPagoWebhook *handler.WebhookHandler
 	Health             *handler.HealthHandler
 }
 
-// NewRouter wires the HTTP surface described in the plan: checkout is behind the API
-// Gateway's normal JWT auth, the two webhook routes are permit-all at the gateway (Stripe
-// and Mercado Pago call them directly, with no app JWT), and health/metrics are
-// unauthenticated infra endpoints, same as every other orderhub service.
 func NewRouter(deps RouterDeps) http.Handler {
 	r := chi.NewRouter()
 	r.Use(Recoverer, otelhttp.NewMiddleware("payment-service"), RequestLogger)
@@ -31,6 +28,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 
 	r.Route("/api/v1/payments", func(r chi.Router) {
 		r.Post("/checkout", deps.Checkout.ServeHTTP)
+		r.Post("/{orderId}/reconcile", deps.Reconcile.ServeHTTP)
 		r.Post("/webhooks/stripe", deps.StripeWebhook.ServeHTTP)
 		r.Post("/webhooks/mercadopago", deps.MercadoPagoWebhook.ServeHTTP)
 	})

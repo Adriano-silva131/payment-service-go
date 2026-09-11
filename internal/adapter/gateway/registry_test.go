@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -24,6 +25,10 @@ func (g *stubGateway) CreateCheckout(ctx context.Context, req usecase.CheckoutRe
 }
 
 func (g *stubGateway) ParseWebhook(ctx context.Context, r *http.Request) (*usecase.WebhookNotification, error) {
+	return nil, nil
+}
+
+func (g *stubGateway) GetStatus(ctx context.Context, orderID uuid.UUID, gatewayTransactionID string) (*usecase.WebhookNotification, error) {
 	return nil, nil
 }
 

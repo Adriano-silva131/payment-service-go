@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/sasl/plain"
 
 	"github.com/adriano-linux/payment-service-go/internal/adapter/dlt"
 	"github.com/adriano-linux/payment-service-go/internal/adapter/gateway"
@@ -35,6 +36,17 @@ func main() {
 		slog.Error("fatal startup error", "error", err)
 		os.Exit(1)
 	}
+}
+
+func kafkaOpts(cfg *config.Config, extra ...kgo.Opt) []kgo.Opt {
+	opts := append([]kgo.Opt{kgo.SeedBrokers(cfg.KafkaBrokers...)}, extra...)
+	if cfg.KafkaSASLUsername != "" {
+		opts = append(opts, kgo.SASL(plain.Auth{
+			User: cfg.KafkaSASLUsername,
+			Pass: cfg.KafkaSASLPassword,
+		}.AsMechanism()))
+	}
+	return opts
 }
 
 func run() error {
@@ -67,7 +79,7 @@ func run() error {
 	paymentRepo := postgres.NewPaymentRepository(pool)
 	dltRepo := postgres.NewDltRepository(pool)
 
-	producerClient, err := kgo.NewClient(kgo.SeedBrokers(cfg.KafkaBrokers...))
+	producerClient, err := kgo.NewClient(kafkaOpts(cfg, kgo.ProducerBatchCompression(kgo.NoCompression()))...)
 	if err != nil {
 		return err
 	}
@@ -84,29 +96,30 @@ func run() error {
 	stagePayment := usecase.NewStagePayment(paymentRepo)
 	startCheckout := usecase.NewStartCheckout(paymentRepo, gatewayRegistry, cfg.PaymentSuccessURL, cfg.PaymentCancelURL)
 	handleWebhook := usecase.NewHandleWebhook(paymentRepo, gatewayRegistry, producer)
+	reconcile := usecase.NewReconcile(paymentRepo, gatewayRegistry, producer)
+	reconcileSweep := usecase.NewReconcileSweep(paymentRepo, gatewayRegistry, producer,
+		time.Duration(cfg.PaymentReconcileStaleAfterMs)*time.Millisecond)
 
 	handlerRegistry := adapterkafka.NewHandlerRegistry(
 		kafkahandler.NewOrderCreatedHandler(stagePayment),
 	)
 
-	mainConsumerClient, err := kgo.NewClient(
-		kgo.SeedBrokers(cfg.KafkaBrokers...),
+	mainConsumerClient, err := kgo.NewClient(kafkaOpts(cfg,
 		kgo.ConsumerGroup(cfg.KafkaConsumerGroup),
 		kgo.ConsumeTopics(adapterkafka.OrderEventsTopic),
 		kgo.DisableAutoCommit(),
-	)
+	)...)
 	if err != nil {
 		return err
 	}
 	defer mainConsumerClient.Close()
 
 	retryTopic := adapterkafka.RetryTopic(adapterkafka.OrderEventsTopic)
-	retryConsumerClient, err := kgo.NewClient(
-		kgo.SeedBrokers(cfg.KafkaBrokers...),
+	retryConsumerClient, err := kgo.NewClient(kafkaOpts(cfg,
 		kgo.ConsumerGroup(cfg.KafkaConsumerGroup+"-retry"),
 		kgo.ConsumeTopics(retryTopic),
 		kgo.DisableAutoCommit(),
-	)
+	)...)
 	if err != nil {
 		return err
 	}
@@ -119,9 +132,11 @@ func run() error {
 	go mainConsumer.Run(ctx)
 	go retryConsumer.Run(ctx)
 	go reprocessor.Run(ctx, time.Duration(cfg.DltReprocessIntervalMs)*time.Millisecond)
+	go reconcileSweep.Run(ctx, time.Duration(cfg.PaymentReconcileIntervalMs)*time.Millisecond)
 
 	router := httptransport.NewRouter(httptransport.RouterDeps{
 		Checkout:           handler.NewCheckoutHandler(startCheckout),
+		Reconcile:          handler.NewReconcileHandler(reconcile),
 		StripeWebhook:      handler.NewWebhookHandler(handleWebhook, domain.PaymentMethodStripe),
 		MercadoPagoWebhook: handler.NewWebhookHandler(handleWebhook, domain.PaymentMethodMercadoPago),
 		Health:             handler.NewHealthHandler(pool),

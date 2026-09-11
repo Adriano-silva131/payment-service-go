@@ -56,7 +56,7 @@ func (g *Gateway) CreateCheckout(ctx context.Context, req usecase.CheckoutReques
 		ExternalReference: req.OrderID.String(),
 		Items: []preference.ItemRequest{
 			{
-				Title:      fmt.Sprintf("Pedido OrderHub %s", req.OrderID),
+				Title:      fmt.Sprintf("Pedido OrderHub #%d", req.OrderNumber),
 				Quantity:   1,
 				UnitPrice:  amount,
 				CurrencyID: currencyID,
@@ -84,6 +84,31 @@ func (g *Gateway) CreateCheckout(ctx context.Context, req usecase.CheckoutReques
 	return &usecase.CheckoutResult{
 		GatewayTransactionID: pref.ID,
 		CheckoutURL:          checkoutURL,
+	}, nil
+}
+
+func (g *Gateway) GetStatus(ctx context.Context, orderID uuid.UUID, gatewayTransactionID string) (*usecase.WebhookNotification, error) {
+	result, err := g.payments.Search(ctx, payment.SearchRequest{
+		Limit:   1,
+		Filters: map[string]string{"external_reference": orderID.String(), "sort": "date_created", "criteria": "desc"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("searching mercadopago payments for order %s: %w", orderID, err)
+	}
+	if len(result.Results) == 0 {
+		// No payment attempt recorded on Mercado Pago's side yet — genuinely pending.
+		return nil, nil
+	}
+
+	mpPayment := result.Results[0]
+	status := mapStatus(mpPayment.Status)
+	if status == "" {
+		return nil, nil
+	}
+
+	return &usecase.WebhookNotification{
+		GatewayTransactionID: strconv.Itoa(mpPayment.ID),
+		Status:               status,
 	}, nil
 }
 

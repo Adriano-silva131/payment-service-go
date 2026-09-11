@@ -31,6 +31,7 @@ func (h *OrderCreatedHandler) Handle(ctx context.Context, payload []byte) error 
 
 	return h.stagePayment.Handle(ctx, usecase.StagePaymentInput{
 		OrderID:       evt.OrderID,
+		OrderNumber:   evt.OrderNumber,
 		CustomerID:    evt.CustomerID,
 		CustomerEmail: evt.CustomerEmail,
 		TotalAmount:   evt.TotalAmount,

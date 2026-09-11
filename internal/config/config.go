@@ -14,7 +14,16 @@ type Config struct {
 	KafkaBrokers       []string `env:"KAFKA_BROKERS" envSeparator:"," envDefault:"localhost:9092"`
 	KafkaConsumerGroup string   `env:"KAFKA_CONSUMER_GROUP_ID" envDefault:"payment-group"`
 
+	KafkaSASLUsername string `env:"KAFKA_SASL_USERNAME"`
+	KafkaSASLPassword string `env:"KAFKA_SASL_PASSWORD"`
+
 	DltReprocessIntervalMs int `env:"DLT_REPROCESS_INTERVAL_MS" envDefault:"60000"`
+
+	// Self-healing for checkouts whose webhook confirmation never arrived: every
+	// PaymentReconcileIntervalMs, poll the gateway directly for any payment that has sat in
+	// CHECKOUT_STARTED longer than PaymentReconcileStaleAfterMs.
+	PaymentReconcileIntervalMs   int `env:"PAYMENT_RECONCILE_INTERVAL_MS" envDefault:"60000"`
+	PaymentReconcileStaleAfterMs int `env:"PAYMENT_RECONCILE_STALE_AFTER_MS" envDefault:"120000"`
 
 	StripeSecretKey     string `env:"STRIPE_SECRET_KEY"`
 	StripeWebhookSecret string `env:"STRIPE_WEBHOOK_SECRET"`

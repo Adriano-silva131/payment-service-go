@@ -3,6 +3,7 @@ package usecase_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
@@ -64,13 +65,38 @@ func (f *fakePaymentRepo) Update(ctx context.Context, p *domain.Payment) error {
 	return nil
 }
 
-func (f *fakePaymentRepo) TryClaimForCheckout(ctx context.Context, orderID uuid.UUID) (bool, error) {
+func (f *fakePaymentRepo) TryClaimForCheckout(ctx context.Context, orderID uuid.UUID) (bool, int64, error) {
 	p, ok := f.byOrderID[orderID]
 	if !ok || p.Status != domain.PaymentStatusPending {
-		return false, nil
+		return false, 0, nil
 	}
 	p.Status = domain.PaymentStatusCheckoutStarted
+	p.CheckoutAttempt++
+	return true, p.CheckoutAttempt, nil
+}
+
+func (f *fakePaymentRepo) ResolveIfNotFinal(ctx context.Context, orderID uuid.UUID, status domain.PaymentStatus, gateway domain.PaymentMethod, gatewayTransactionID string) (bool, error) {
+	p, ok := f.byOrderID[orderID]
+	if !ok {
+		return false, domain.ErrPaymentNotFound
+	}
+	if p.Status == domain.PaymentStatusApproved || p.Status == domain.PaymentStatusRejected {
+		return false, nil
+	}
+	p.Status = status
+	p.Gateway = &gateway
+	p.GatewayTransactionID = &gatewayTransactionID
 	return true, nil
+}
+
+func (f *fakePaymentRepo) FindStaleCheckoutStarted(ctx context.Context, cutoff time.Time) ([]*domain.Payment, error) {
+	var stale []*domain.Payment
+	for _, p := range f.byOrderID {
+		if p.Status == domain.PaymentStatusCheckoutStarted && p.UpdatedAt.Before(cutoff) {
+			stale = append(stale, p)
+		}
+	}
+	return stale, nil
 }
 
 func (f *fakePaymentRepo) ReleaseCheckoutClaim(ctx context.Context, orderID uuid.UUID) error {

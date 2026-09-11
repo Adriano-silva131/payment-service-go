@@ -14,6 +14,7 @@ import (
 
 type StagePaymentInput struct {
 	OrderID       uuid.UUID
+	OrderNumber   int64
 	CustomerID    string
 	CustomerEmail string
 	TotalAmount   decimal.Decimal
@@ -41,6 +42,7 @@ func (uc *StagePayment) Handle(ctx context.Context, in StagePaymentInput) error 
 	payment := &domain.Payment{
 		ID:            uuid.New(),
 		OrderID:       in.OrderID,
+		OrderNumber:   in.OrderNumber,
 		CustomerID:    in.CustomerID,
 		CustomerEmail: in.CustomerEmail,
 		Amount:        in.TotalAmount,

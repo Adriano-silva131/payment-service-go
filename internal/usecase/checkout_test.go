@@ -16,12 +16,14 @@ import (
 )
 
 type fakeGateway struct {
-	method         domain.PaymentMethod
-	checkoutResult *usecase.CheckoutResult
-	checkoutErr    error
-	webhookResult  *usecase.WebhookNotification
-	webhookErr     error
-	lastCheckout   usecase.CheckoutRequest
+	method          domain.PaymentMethod
+	checkoutResult  *usecase.CheckoutResult
+	checkoutErr     error
+	webhookResult   *usecase.WebhookNotification
+	webhookErr      error
+	getStatusResult *usecase.WebhookNotification
+	getStatusErr    error
+	lastCheckout    usecase.CheckoutRequest
 }
 
 func (g *fakeGateway) Method() domain.PaymentMethod { return g.method }
@@ -33,6 +35,10 @@ func (g *fakeGateway) CreateCheckout(ctx context.Context, req usecase.CheckoutRe
 
 func (g *fakeGateway) ParseWebhook(ctx context.Context, r *http.Request) (*usecase.WebhookNotification, error) {
 	return g.webhookResult, g.webhookErr
+}
+
+func (g *fakeGateway) GetStatus(ctx context.Context, orderID uuid.UUID, gatewayTransactionID string) (*usecase.WebhookNotification, error) {
+	return g.getStatusResult, g.getStatusErr
 }
 
 type fakeGatewayResolver struct {
@@ -133,7 +139,38 @@ func TestStartCheckout_SendsStableIdempotencyKeyToGateway(t *testing.T) {
 	_, err := uc.Handle(context.Background(), usecase.StartCheckoutInput{OrderID: orderID, Method: domain.PaymentMethodStripe, CustomerID: "customer-1"})
 
 	require.NoError(t, err)
-	assert.Equal(t, orderID.String(), stripe.lastCheckout.IdempotencyKey, "idempotency key must be stable per order, so a retried call resolves to the same gateway session")
+	assert.Equal(t, orderID.String()+"-1", stripe.lastCheckout.IdempotencyKey,
+		"idempotency key must be stable within one checkout attempt, so a retried call resolves to the same gateway session")
+}
+
+func TestStartCheckout_UsesFreshIdempotencyKeyOnEachNewAttempt(t *testing.T) {
+	repo := newFakePaymentRepo()
+	orderID := uuid.New()
+	stagedPayment(repo, orderID, "customer-1")
+
+	stripe := &fakeGateway{
+		method:         domain.PaymentMethodStripe,
+		checkoutResult: &usecase.CheckoutResult{GatewayTransactionID: "cs_test_123", CheckoutURL: "https://checkout.stripe.com/cs_test_123"},
+	}
+	resolver := &fakeGatewayResolver{gateways: map[domain.PaymentMethod]usecase.PaymentGateway{domain.PaymentMethodStripe: stripe}}
+	uc := usecase.NewStartCheckout(repo, resolver, "https://success", "https://cancel")
+
+	_, err := uc.Handle(context.Background(), usecase.StartCheckoutInput{OrderID: orderID, Method: domain.PaymentMethodStripe, CustomerID: "customer-1"})
+	require.NoError(t, err)
+	firstKey := stripe.lastCheckout.IdempotencyKey
+
+	// Order was abandoned and released back to PENDING (e.g. a checkout.session.expired
+	// webhook, or an error mid-flow) — a second, later attempt must not reuse the first
+	// attempt's key, or it would inherit whatever gateway params the first attempt sent even
+	// if this service's checkout-building code changed in between.
+	repo.byOrderID[orderID].Status = domain.PaymentStatusPending
+
+	_, err = uc.Handle(context.Background(), usecase.StartCheckoutInput{OrderID: orderID, Method: domain.PaymentMethodStripe, CustomerID: "customer-1"})
+	require.NoError(t, err)
+	secondKey := stripe.lastCheckout.IdempotencyKey
+
+	assert.NotEqual(t, firstKey, secondKey, "a new checkout attempt must get a fresh idempotency key")
+	assert.Equal(t, orderID.String()+"-2", secondKey)
 }
 
 func TestStartCheckout_ConcurrentCallForSameOrderIsRejectedNotDoubleCharged(t *testing.T) {
@@ -142,7 +179,7 @@ func TestStartCheckout_ConcurrentCallForSameOrderIsRejectedNotDoubleCharged(t *t
 	stagedPayment(repo, orderID, "customer-1")
 
 	// Simulates a second request winning the race after the first already claimed the order.
-	claimed, err := repo.TryClaimForCheckout(context.Background(), orderID)
+	claimed, _, err := repo.TryClaimForCheckout(context.Background(), orderID)
 	require.NoError(t, err)
 	require.True(t, claimed)
 
@@ -185,6 +222,24 @@ func TestStartCheckout_AlreadyResolvedPaymentReturnsDistinctError(t *testing.T) 
 	_, err := uc.Handle(context.Background(), usecase.StartCheckoutInput{OrderID: orderID, Method: domain.PaymentMethodStripe, CustomerID: "customer-1"})
 	assert.ErrorIs(t, err, domain.ErrPaymentAlreadyResolved,
 		"an already-approved/rejected order must not be reported as a transient checkout race")
+}
+
+func TestStartCheckout_ReturnsExistingSessionWhenCheckoutAlreadyOpen(t *testing.T) {
+	repo := newFakePaymentRepo()
+	orderID := uuid.New()
+	stagedPayment(repo, orderID, "customer-1")
+
+	existingURL := "https://checkout.stripe.com/c/pay/cs_test_existing"
+	repo.byOrderID[orderID].Status = domain.PaymentStatusCheckoutStarted
+	repo.byOrderID[orderID].CheckoutURL = &existingURL
+
+	resolver := &fakeGatewayResolver{gateways: map[domain.PaymentMethod]usecase.PaymentGateway{}}
+	uc := usecase.NewStartCheckout(repo, resolver, "https://success", "https://cancel")
+
+	out, err := uc.Handle(context.Background(), usecase.StartCheckoutInput{OrderID: orderID, Method: domain.PaymentMethodStripe, CustomerID: "customer-1"})
+
+	require.NoError(t, err, "a checkout already in progress with a known URL should be handed back, not rejected")
+	assert.Equal(t, existingURL, out.CheckoutURL)
 }
 
 func TestStartCheckout_ReleasesClaimWhenGatewayCallFails(t *testing.T) {

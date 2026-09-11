@@ -50,7 +50,7 @@ func (uc *StartCheckout) Handle(ctx context.Context, in StartCheckoutInput) (*St
 		return nil, domain.ErrForbidden
 	}
 
-	claimed, err := uc.repo.TryClaimForCheckout(ctx, in.OrderID)
+	claimed, attempt, err := uc.repo.TryClaimForCheckout(ctx, in.OrderID)
 	if err != nil {
 		return nil, fmt.Errorf("claiming payment for checkout, order %s: %w", in.OrderID, err)
 	}
@@ -58,11 +58,12 @@ func (uc *StartCheckout) Handle(ctx context.Context, in StartCheckoutInput) (*St
 		if payment.Status == domain.PaymentStatusApproved || payment.Status == domain.PaymentStatusRejected {
 			return nil, domain.ErrPaymentAlreadyResolved
 		}
+		if payment.Status == domain.PaymentStatusCheckoutStarted && payment.CheckoutURL != nil {
+			return &StartCheckoutOutput{CheckoutURL: *payment.CheckoutURL}, nil
+		}
 		return nil, domain.ErrCheckoutInProgress
 	}
 
-	// From here on, any failure must release the claim back to PENDING so the order
-	// isn't stuck in CHECKOUT_STARTED forever with no usable checkout URL.
 	succeeded := false
 	defer func() {
 		if succeeded {
@@ -79,12 +80,17 @@ func (uc *StartCheckout) Handle(ctx context.Context, in StartCheckoutInput) (*St
 	}
 
 	result, err := gw.CreateCheckout(ctx, CheckoutRequest{
-		OrderID:        payment.OrderID,
-		Amount:         payment.Amount,
-		CustomerEmail:  payment.CustomerEmail,
-		SuccessURL:     uc.successURL,
-		CancelURL:      uc.cancelURL,
-		IdempotencyKey: payment.OrderID.String(),
+		OrderID:       payment.OrderID,
+		OrderNumber:   payment.OrderNumber,
+		Amount:        payment.Amount,
+		CustomerEmail: payment.CustomerEmail,
+		SuccessURL:    uc.successURL,
+		CancelURL:     uc.cancelURL,
+		// Stable within this attempt (so a retry after a network hiccup resolves to the
+		// same gateway session), but rotates on every new claim — unlike a bare order-derived
+		// key, it can't get permanently stuck rejecting the order for 24h if the request
+		// parameters ever change between attempts (e.g. a deploy).
+		IdempotencyKey: fmt.Sprintf("%s-%d", payment.OrderID, attempt),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating checkout session via %s: %w", in.Method, err)

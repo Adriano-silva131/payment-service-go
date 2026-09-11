@@ -26,6 +26,7 @@ const (
 type Payment struct {
 	ID                   uuid.UUID
 	OrderID              uuid.UUID
+	OrderNumber          int64
 	CustomerID           string
 	CustomerEmail        string
 	Amount               decimal.Decimal
@@ -33,6 +34,7 @@ type Payment struct {
 	Gateway              *PaymentMethod
 	GatewayTransactionID *string
 	CheckoutURL          *string
+	CheckoutAttempt      int64
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
 }
